@@ -58,6 +58,7 @@ typedef struct {
     int scanFastSeconds;          /* rescan every 1 s for this long          */
     int scanSlowMs;               /* then rescan at this interval            */
     int verboseLog;
+    int perfLogSeconds;           /* 0 = off; else log per-thread CPU load   */
 } Config;
 
 static Config  g_cfg;
@@ -103,6 +104,9 @@ static void LoadConfig(void)
     g_cfg.scanFastSeconds          = IniInt(ini, L"ScanFastSeconds", 180);
     g_cfg.scanSlowMs               = IniInt(ini, L"ScanSlowMs", 5000);
     g_cfg.verboseLog               = IniInt(ini, L"VerboseLog", 0);
+    g_cfg.perfLogSeconds           = IniInt(ini, L"PerfLogSeconds", 0);
+    if (g_cfg.perfLogSeconds < 0) g_cfg.perfLogSeconds = 0;
+    if (g_cfg.perfLogSeconds > 0 && g_cfg.perfLogSeconds < 2) g_cfg.perfLogSeconds = 2;
 }
 
 /* ------------------------------------------------------------------ */
@@ -312,8 +316,97 @@ static int CriticalLP(int kind)
 
 static KAFFINITY BackgroundMask(void) { return g_bgMask; }
 
+/* ------------------------------------------------------------------ */
+/* Optional diagnostics: per-thread CPU load (PerfLogSeconds)         */
+/*                                                                    */
+/* A thread near 100% of one core is what limits the frame rate. The  */
+/* log shows which one: GameThread (simulation, AI, foliage logic),   */
+/* RenderThread / RHIThread (draw calls) or the background workers.   */
+/* ------------------------------------------------------------------ */
+
+enum { P_GAME, P_RENDER, P_RHI, P_AUDIO, P_COUNT };
+static HANDLE    g_perfThread[P_COUNT];
+static ULONGLONG g_perfLast[P_COUNT];
+static ULONGLONG g_perfLastProc, g_perfLastWall;
+static ULONGLONG g_perfLastWorkers;
+static DWORD     g_workerTid[256];
+static int       g_nworkers;
+static double    g_perfPeak[P_COUNT + 1];
+static int       g_perfSamples;
+
+static ULONGLONG FtToU64(FILETIME f) { return ((ULONGLONG)f.dwHighDateTime << 32) | f.dwLowDateTime; }
+
+static ULONGLONG ThreadCpu(HANDLE h)
+{
+    FILETIME c, e, k, u;
+    if (!h || !GetThreadTimes(h, &c, &e, &k, &u)) return 0;
+    return FtToU64(k) + FtToU64(u);
+}
+
+static ULONGLONG WorkersCpu(void)
+{
+    ULONGLONG sum = 0;
+    for (int i = 0; i < g_nworkers; i++) {
+        HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, g_workerTid[i]);
+        if (h) { sum += ThreadCpu(h); CloseHandle(h); }
+    }
+    return sum;
+}
+
+static ULONGLONG WallNow(void) { FILETIME f; GetSystemTimeAsFileTime(&f); return FtToU64(f); }
+
+static void PerfTrack(DWORD tid, int kind)
+{
+    if (!g_cfg.perfLogSeconds) return;
+    int slot = (kind == T_GAME) ? P_GAME : (kind == T_RENDER) ? P_RENDER :
+               (kind == T_RHI) ? P_RHI : (kind == T_AUDIO_MIX) ? P_AUDIO : -1;
+    if (kind == T_BACKGROUND) {
+        if (g_nworkers < 256) g_workerTid[g_nworkers++] = tid;
+        return;
+    }
+    if (slot < 0) return;
+    HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
+    if (!h) return;
+    if (g_perfThread[slot]) CloseHandle(g_perfThread[slot]);   /* newest one wins (UE restarts the mixer) */
+    g_perfThread[slot] = h;
+    g_perfLast[slot] = ThreadCpu(h);
+}
+
+static void PerfSample(void)
+{
+    ULONGLONG wall = WallNow();
+    FILETIME c, e, k, u;
+    GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
+    ULONGLONG proc = FtToU64(k) + FtToU64(u);
+    ULONGLONG workers = WorkersCpu();
+
+    if (g_perfLastWall) {
+        double dt = (double)(wall - g_perfLastWall);
+        if (dt <= 0) return;
+        double pct[P_COUNT];
+        for (int i = 0; i < P_COUNT; i++) {
+            ULONGLONG now = ThreadCpu(g_perfThread[i]);
+            pct[i] = (g_perfThread[i] && now >= g_perfLast[i]) ? 100.0 * (double)(now - g_perfLast[i]) / dt : 0;
+            g_perfLast[i] = now;
+            if (pct[i] > g_perfPeak[i]) g_perfPeak[i] = pct[i];
+        }
+        double procPct = 100.0 * (double)(proc - g_perfLastProc) / dt;
+        double wrkPct  = workers >= g_perfLastWorkers ? 100.0 * (double)(workers - g_perfLastWorkers) / dt : 0;
+        if (procPct > g_perfPeak[P_COUNT]) g_perfPeak[P_COUNT] = procPct;
+        LogLine("Perf: game %3.0f%%  render %3.0f%%  rhi %3.0f%%  audio %3.0f%%  workers(%d) %4.0f%%  process %4.0f%% of %d00%%",
+                pct[P_GAME], pct[P_RENDER], pct[P_RHI], pct[P_AUDIO], g_nworkers, wrkPct, procPct, PopCount(g_allMask));
+        if (++g_perfSamples % 60 == 0)
+            LogLine("Perf peaks so far: game %.0f%%  render %.0f%%  rhi %.0f%%  audio %.0f%%  process %.0f%%",
+                    g_perfPeak[P_GAME], g_perfPeak[P_RENDER], g_perfPeak[P_RHI], g_perfPeak[P_AUDIO], g_perfPeak[P_COUNT]);
+    } else {
+        for (int i = 0; i < P_COUNT; i++) g_perfLast[i] = ThreadCpu(g_perfThread[i]);
+    }
+    g_perfLastWall = wall; g_perfLastProc = proc; g_perfLastWorkers = workers;
+}
+
 static int ApplyToThread(DWORD tid, int kind)
 {
+    PerfTrack(tid, kind);
     HANDLE h = OpenThread(THREAD_SET_INFORMATION | THREAD_QUERY_INFORMATION, FALSE, tid);
     if (!h) return 0;
 
@@ -430,7 +523,7 @@ static void ApplyProcessSettings(void)
 /* bigger buffer gives the mixer more slack, which stops dropouts and */
 /* crackle on CPUs that can't always deliver audio on time.           */
 /*                                                                    */
-/* Windrose deletes or rewrites the user Engine.ini when it exits, so */
+/* Windrose deletes the user Engine.ini again after reading it, so    */
 /* the keys are written again at every launch, before the engine      */
 /* reads its config. The first time, the original Engine.ini (if any) */
 /* is copied to Engine.ini.WindroseFXCore.bak and the original values */
@@ -582,12 +675,24 @@ static DWORD WINAPI Worker(LPVOID unused)
             CriticalLP(T_GAME), CriticalLP(T_RENDER), CriticalLP(T_RHI), g_audioLP, (unsigned long long)bg,
             g_cfg.isolateBackgroundWorkers ? "" : " (not applied: IsolateBackgroundWorkers=0)");
 
-    ULONGLONG start = GetTickCount64();
+    if (g_cfg.perfLogSeconds)
+        LogLine("Perf log: every %d s. 100%% = one full core; a critical thread near 100%% is the bottleneck.",
+                g_cfg.perfLogSeconds);
+
+    ULONGLONG start = GetTickCount64(), lastScan = 0, lastPerf = start;
     for (;;) {
-        int n = ScanThreads();
-        if (n && !g_cfg.verboseLog) LogLine("Scan: tuned %d new thread(s)", n);
-        ULONGLONG elapsed = GetTickCount64() - start;
-        Sleep(elapsed < (ULONGLONG)g_cfg.scanFastSeconds * 1000 ? 1000 : (DWORD)g_cfg.scanSlowMs);
+        ULONGLONG now = GetTickCount64();
+        DWORD scanEvery = (now - start) < (ULONGLONG)g_cfg.scanFastSeconds * 1000 ? 1000 : (DWORD)g_cfg.scanSlowMs;
+        if (!lastScan || now - lastScan >= scanEvery) {
+            int n = ScanThreads();
+            if (n && !g_cfg.verboseLog) LogLine("Scan: tuned %d new thread(s)", n);
+            lastScan = now;
+        }
+        if (g_cfg.perfLogSeconds && now - lastPerf >= (ULONGLONG)g_cfg.perfLogSeconds * 1000) {
+            PerfSample();
+            lastPerf = now;
+        }
+        Sleep(g_cfg.perfLogSeconds ? 500 : scanEvery);
     }
     return 0;
 }

@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- New diagnostic, off by default: `PerfLogSeconds=5` logs how much CPU GameThread, RenderThread, RHIThread, the audio mixer and the background workers use, so you can see which thread limits the frame rate in heavy areas.
+- Docs: Windrose deletes the user `Engine.ini` after reading it, not on exit as first described.
+
 ## 1.0.2-beta — 2026-11-08
 
 Fixes audio dropouts and static, found by A/B testing on an FX-8350 (Windows 10).

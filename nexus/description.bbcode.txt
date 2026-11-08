@@ -44,7 +44,7 @@ Windrose is an Unreal Engine 5 game that's heavy on the CPU. If your graphics ca
 [b]Check it's working:[/b] open [b]R5\Binaries\Win64\WindroseFXCore.log[/b] after launching. It lists your CPU layout and the threads it tuned. If there's no log, the DLL didn't load. Please let me know in the comments.
 
 [size=4][b]Audio dropouts or static?[/b][/size]
-Set [b]AudioBufferFix=1[/b] in WindroseFXCore.ini and launch the game. At every launch the mod writes a bigger audio buffer (2048 frames x 4) to [b]%LOCALAPPDATA%\R5\Saved\Config\Windows\Engine.ini[/b]. The game removes it on exit, so it's written each time. Your original Engine.ini is backed up first to Engine.ini.WindroseFXCore.bak.
+Set [b]AudioBufferFix=1[/b] in WindroseFXCore.ini and launch the game. At every launch the mod writes a bigger audio buffer (2048 frames x 4) to [b]%LOCALAPPDATA%\R5\Saved\Config\Windows\Engine.ini[/b]. The game deletes that file again after reading it, so it's written each time. Your original Engine.ini is backed up first to Engine.ini.WindroseFXCore.bak.
 [list]
 [*][b]To undo:[/b] set AudioBufferFix=0 and launch once. Your original values come back.
 [*]Still crackling? Try AudioBufferFrames=4096.

@@ -100,13 +100,14 @@ turn one off, play the same stretch, and compare.
 | `AudioBufferFrames` | 2048 | Frames per buffer (256–8192) |
 | `AudioBuffersToEnqueue` | 4 | Buffers queued ahead (2–8) |
 | `VerboseLog` | 0 | Logs every worker thread too |
+| `PerfLogSeconds` | 0 | Diagnostics: every N seconds, logs CPU use of the critical threads and workers (100% = one full core). `5` is a good value while testing |
 
 ## Audio dropouts or static
 
 If Windrose's audio drops out or crackles, set `AudioBufferFix=1` in `WindroseFXCore.ini` and launch the game.
 
 - At every launch the mod writes these lines to `%LOCALAPPDATA%\R5\Saved\Config\Windows\Engine.ini`
-  (the game removes them again when it exits, so they're written each time):
+  (the game deletes the file again after reading it, so they're written each time):
   ```
   [/Script/WindowsTargetPlatform.WindowsTargetSettings]
   AudioCallbackBufferFrameSize=2048
