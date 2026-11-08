@@ -2,13 +2,17 @@
 
 **A runtime CPU optimizer that helps Windrose run better on older PCs.**
 
-WindroseFXCore doesn't change any graphics settings, config files or game files. It's a small native DLL
+WindroseFXCore doesn't change any graphics settings or game files. It's a small native DLL
 that loads with the game and changes **how Windows schedules Windrose on your CPU**. It helps whatever
 in-game settings you choose and works alongside FSR, DLSS, XeSS and frame generation.
 
+The one exception is the optional **audio buffer fix** (off by default). When you turn it on, the mod writes
+two audio lines to your user `Engine.ini`, backs up the original first, and restores it when you turn it off.
+See [Audio dropouts or static](#audio-dropouts-or-static).
+
 It was built for an AMD FX-8350 and is written to adapt to whatever CPU it finds.
 
-> **Status: 1.0.1-beta.** It builds and loads correctly, but has had limited real-world testing so far.
+> **Status: 1.0.2-beta.** It builds and loads correctly, but has had limited real-world testing so far.
 > Please report your results (good or bad) with your log file. See [Reporting results](#reporting-results).
 
 ---
@@ -32,8 +36,9 @@ and this mod targets exactly that.
 | Fix | Why it helps |
 |---|---|
 | **Topology-aware thread placement** | UE5's GameThread, RenderThread and RHIThread decide your frame rate. When two of them land on the same FX module or the same hyperthreaded core, they slow each other down. The mod reads your CPU's real cache layout at launch and gives each one its own module or core. |
-| **Background worker isolation** | UE's background pool (asset streaming, decompression) is kept off the three critical cores, so a burst of loading can't preempt the threads that build each frame. Most of the pool's capacity stays available. |
-| **Audio protection** | The audio mixer runs at time-critical priority on its own core, kept clear of background workers, so it never misses an audio buffer when the CPU is maxed out. That is the usual cause of crackle on older CPUs. |
+| **Background worker isolation** | UE's background pool (asset streaming, decompression) is kept off the critical cores, so a burst of loading can't preempt the threads that build each frame. Most of the pool's capacity stays available. |
+| **Audio protection** | The audio mixer runs at time-critical priority on its own core, kept clear of background workers, so it doesn't miss audio buffers when the CPU is maxed out. |
+| **Audio buffer fix** (optional, off by default) | Raises UE's audio buffer size, which isn't in Windrose's menus. This is what fixed dropouts and static on the FX-8350 test PC. See [Audio dropouts or static](#audio-dropouts-or-static). |
 | **Priority floors** | Critical threads run at least at Above Normal priority. |
 | **0.5 ms timer resolution** | Windows' default timer can make UE's frame limiter and thread waits overshoot by up to ~15 ms. That shows up as uneven frame pacing. |
 | **Power-throttling opt-out** | Stops Windows from applying EcoQoS or timer coalescing to the game. |
@@ -58,11 +63,12 @@ and it can't help if your GPU is the bottleneck. Lowering resolution or using FS
 After launching, open `R5\Binaries\Win64\WindroseFXCore.log`. On an FX-8350 it looks like this:
 
 ```
-WindroseFXCore 1.0.1-beta loaded into ...\R5-Win64-Shipping.exe
+WindroseFXCore 1.0.2-beta loaded into ...\Windrose-Win64-Shipping.exe
+Audio buffer: set 2048 frames x 4 buffers in Engine.ini      (only with AudioBufferFix=1)
 CPU: AMD FX(tm)-8350 Eight-Core Processor
 Topology: 8 logical processors, 4 execution groups, 1 L3 domain(s)
 Timer resolution: 0.500 ms
-Power throttling opt-out: ok
+Power throttling opt-out: ok (execution speed only)
 Process priority: raised
 Critical LPs: game 0, render 2, rhi 4, audio 6 | background mask 0xaa
   GameThread       tid  ...  prio 1
@@ -90,18 +96,45 @@ turn one off, play the same stretch, and compare.
 | `BoostAudioPriority` | 1 | |
 | `AudioMixerPriority` | 15 | 15 = time-critical, 2 = highest |
 | `PlaceAudioThread` | 1 | Gives the audio mixer its own core, clear of background workers |
+| `AudioBufferFix` | 0 | Writes the audio buffer size to `Engine.ini`. See below |
+| `AudioBufferFrames` | 2048 | Frames per buffer (256–8192) |
+| `AudioBuffersToEnqueue` | 4 | Buffers queued ahead (2–8) |
 | `VerboseLog` | 0 | Logs every worker thread too |
+
+## Audio dropouts or static
+
+If Windrose's audio drops out or crackles, set `AudioBufferFix=1` in `WindroseFXCore.ini` and launch the game.
+
+- At every launch the mod writes these lines to `%LOCALAPPDATA%\R5\Saved\Config\Windows\Engine.ini`
+  (the game removes them again when it exits, so they're written each time):
+  ```
+  [/Script/WindowsTargetPlatform.WindowsTargetSettings]
+  AudioCallbackBufferFrameSize=2048
+  AudioNumBuffersToEnqueue=4
+  ```
+- The first time, an existing `Engine.ini` is copied to `Engine.ini.WindroseFXCore.bak`, and the original values of
+  those two keys are recorded in `WindroseFXCore.state` next to the DLL.
+- **To undo:** set `AudioBufferFix=0` (or `Enabled=0`) and launch once. The original values are put back, and
+  `Engine.ini` is removed if the mod created it.
+- If it still crackles, try `AudioBufferFrames=4096`. A bigger buffer adds some audio delay
+  (2048 × 4 at 48 kHz is up to about 0.17 s). If you notice the delay, lower `AudioBuffersToEnqueue` to 2 or 3.
+
+None of this is in Windrose's settings menu, so it doesn't override anything you can set yourself.
 
 ## Uninstall
 
-Delete `version.dll`, `WindroseFXCore.ini` and `WindroseFXCore.log` from `R5\Binaries\Win64`. Nothing else is changed.
+1. If you turned on `AudioBufferFix`, set it to `0` and launch the game once so your `Engine.ini` is restored.
+2. Delete `version.dll`, `WindroseFXCore.ini`, `WindroseFXCore.log` and `WindroseFXCore.state` (if present) from `R5\Binaries\Win64`.
+
+Without the audio buffer fix, nothing outside the mod's own files is changed.
 
 ## FAQ
 
 **Is it safe online?** Windrose is PvE and had no anti-cheat when this was written. If a future patch
 adds anti-cheat, remove the DLL before playing online. This mod is not intended for use with anti-cheat.
 
-**Will it get my saves or settings messed up?** No. It never touches saves, config or game files.
+**Will it get my saves or settings messed up?** No. It never touches saves or game files, and it only touches
+`Engine.ini` if you turn on `AudioBufferFix`, with a backup and automatic restore.
 
 **Does it work with other mods?** Yes, unless another mod also uses `version.dll` as its loader. In that case
 only one can be installed at a time.
@@ -135,7 +168,8 @@ Versions containing a hyphen (`1.1.0-beta`) are marked as pre-releases.
 
 **How it loads:** Unreal Engine's Core module links `version.dll`, so the game loads it from its own folder first.
 `src/version_proxy.c` forwards all 17 real exports to `System32\version.dll`, and `src/fxcore.c` starts one
-background thread that does the work. It only activates inside an executable whose name contains `Shipping`,
+background thread that does the work (the optional Engine.ini write happens right at load, before the engine reads
+its config). It only activates inside an executable whose name contains `Shipping`,
 so the crash reporter and other tools are never affected.
 
 ## License

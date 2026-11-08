@@ -2,7 +2,7 @@
 
 [b]A runtime mod that helps Windrose run better on older CPUs, without touching your graphics settings.[/b]
 
-WindroseFXCore is a small native DLL that loads with the game and changes [i]how Windows schedules Windrose on your CPU[/i]. It doesn't edit any config files, game files or saves, and it works with whatever in-game settings you choose, including FSR, DLSS, XeSS and frame generation.
+WindroseFXCore is a small native DLL that loads with the game and changes [i]how Windows schedules Windrose on your CPU[/i]. It doesn't edit game files or saves, and it works with whatever in-game settings you choose, including FSR, DLSS, XeSS and frame generation. The only config file it can touch is your Engine.ini, and only if you turn on the optional audio buffer fix (backed up and restored automatically).
 
 It was built on an AMD FX-8350 and adapts itself to whatever CPU it finds.
 
@@ -23,7 +23,8 @@ Windrose is an Unreal Engine 5 game that's heavy on the CPU. If your graphics ca
 [list]
 [*][b]Topology-aware thread placement[/b]: GameThread, RenderThread and RHIThread each get their own CPU module or core.
 [*][b]Background worker isolation[/b]: asset streaming and decompression are kept off those cores, so loading bursts can't interrupt frame building.
-[*][b]Audio protection[/b]: the audio mixer runs at time-critical priority on its own core, clear of background workers, so it never misses an audio buffer when the CPU is maxed out.
+[*][b]Audio protection[/b]: the audio mixer runs at time-critical priority on its own core, clear of background workers.
+[*][b]Audio buffer fix[/b] (optional, off by default): raises the engine's audio buffer size, which isn't in the game's menus. Fixes audio dropouts and static on older CPUs. See below.
 [*][b]Priority floors[/b]: critical threads run at Above Normal.
 [*][b]0.5 ms timer resolution[/b]: steadier frame pacing.
 [*][b]Power-throttling opt-out[/b]: Windows never parks the game on a slow clock.
@@ -42,11 +43,22 @@ Windrose is an Unreal Engine 5 game that's heavy on the CPU. If your graphics ca
 
 [b]Check it's working:[/b] open [b]R5\Binaries\Win64\WindroseFXCore.log[/b] after launching. It lists your CPU layout and the threads it tuned. If there's no log, the DLL didn't load. Please let me know in the comments.
 
+[size=4][b]Audio dropouts or static?[/b][/size]
+Set [b]AudioBufferFix=1[/b] in WindroseFXCore.ini and launch the game. At every launch the mod writes a bigger audio buffer (2048 frames x 4) to [b]%LOCALAPPDATA%\R5\Saved\Config\Windows\Engine.ini[/b]. The game removes it on exit, so it's written each time. Your original Engine.ini is backed up first to Engine.ini.WindroseFXCore.bak.
+[list]
+[*][b]To undo:[/b] set AudioBufferFix=0 and launch once. Your original values come back.
+[*]Still crackling? Try AudioBufferFrames=4096.
+[*]A bigger buffer adds a little audio delay (up to about 0.17 s at 2048 x 4). If you notice it, set AudioBuffersToEnqueue=2 or 3.
+[/list]
+
 [size=4][b]Uninstall[/b][/size]
-Delete [b]version.dll[/b], [b]WindroseFXCore.ini[/b] and [b]WindroseFXCore.log[/b] from R5\Binaries\Win64. Nothing else is changed.
+[list=1]
+[*]If you turned on AudioBufferFix, set it to 0 and launch the game once, so your Engine.ini is restored.
+[*]Delete [b]version.dll[/b], [b]WindroseFXCore.ini[/b], [b]WindroseFXCore.log[/b] and [b]WindroseFXCore.state[/b] (if present) from R5\Binaries\Win64.
+[/list]
 
 [size=4][b]Configuration[/b][/size]
-Every fix can be switched off individually in [b]WindroseFXCore.ini[/b], so you can A/B test each one.
+Every fix can be switched on or off individually in [b]WindroseFXCore.ini[/b], so you can A/B test each one.
 
 [size=4][b]FAQ[/b][/size]
 [b]Safe online?[/b] Windrose is PvE and had no anti-cheat when this was released. If anti-cheat is ever added, remove the DLL before playing online.

@@ -56,7 +56,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     (void)reserved;
     if (reason == DLL_PROCESS_ATTACH) {
         DisableThreadLibraryCalls(inst);
-        FXCore_Start(inst);   /* only spawns a thread; no heavy work under loader lock */
+        FXCore_Start(inst);   /* spawns a thread; only light kernel32 file I/O under loader lock */
     }
     return TRUE;
 }

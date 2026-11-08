@@ -3,8 +3,10 @@
  * https://github.com/mcirish3/WindroseFXCore  (MIT License)
  *
  * Loaded into the game as a version.dll proxy. It does NOT change any graphics
- * settings, config files or game files. It changes how Windows runs the game's
- * threads, aimed at older CPUs (AMD FX, older Intel Core, early Ryzen):
+ * settings or game files. It changes how Windows runs the game's threads,
+ * aimed at older CPUs (AMD FX, older Intel Core, early Ryzen). The only config
+ * file it can touch is the user Engine.ini, and only when the optional
+ * AudioBufferFix is turned on (see the Engine.ini section below):
  *
  *   1. High-resolution system timer (0.5 ms) so UE's frame limiter and thread
  *      waits wake on time instead of overshooting by up to ~15 ms.
@@ -33,7 +35,7 @@
 #include <stdarg.h>
 #include <wchar.h>
 
-#define FXCORE_VERSION "1.0.1-beta"
+#define FXCORE_VERSION "1.0.2-beta"
 
 /* ------------------------------------------------------------------ */
 /* Config & logging                                                   */
@@ -50,6 +52,9 @@ typedef struct {
     int boostAudioPriority;
     int audioMixerPriority;       /* Windows thread priority for the mixer */
     int placeAudioThread;
+    int audioBufferFix;           /* write the audio buffer keys to Engine.ini */
+    int audioBufferFrames;        /* AudioCallbackBufferFrameSize            */
+    int audioBuffersToEnqueue;    /* AudioNumBuffersToEnqueue                */
     int scanFastSeconds;          /* rescan every 1 s for this long          */
     int scanSlowMs;               /* then rescan at this interval            */
     int verboseLog;
@@ -88,6 +93,13 @@ static void LoadConfig(void)
     g_cfg.boostAudioPriority       = IniInt(ini, L"BoostAudioPriority", 1);
     g_cfg.audioMixerPriority       = IniInt(ini, L"AudioMixerPriority", THREAD_PRIORITY_TIME_CRITICAL);
     g_cfg.placeAudioThread         = IniInt(ini, L"PlaceAudioThread", 1);
+    g_cfg.audioBufferFix           = IniInt(ini, L"AudioBufferFix", 0);
+    g_cfg.audioBufferFrames        = IniInt(ini, L"AudioBufferFrames", 2048);
+    g_cfg.audioBuffersToEnqueue    = IniInt(ini, L"AudioBuffersToEnqueue", 4);
+    if (g_cfg.audioBufferFrames < 256)  g_cfg.audioBufferFrames = 256;
+    if (g_cfg.audioBufferFrames > 8192) g_cfg.audioBufferFrames = 8192;
+    if (g_cfg.audioBuffersToEnqueue < 2) g_cfg.audioBuffersToEnqueue = 2;
+    if (g_cfg.audioBuffersToEnqueue > 8) g_cfg.audioBuffersToEnqueue = 8;
     g_cfg.scanFastSeconds          = IniInt(ini, L"ScanFastSeconds", 180);
     g_cfg.scanSlowMs               = IniInt(ini, L"ScanSlowMs", 5000);
     g_cfg.verboseLog               = IniInt(ini, L"VerboseLog", 0);
@@ -412,6 +424,142 @@ static void ApplyProcessSettings(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Optional: engine audio buffer (user Engine.ini)                    */
+/*                                                                    */
+/* UE's audio mixer buffer size isn't exposed in Windrose's menus. A  */
+/* bigger buffer gives the mixer more slack, which stops dropouts and */
+/* crackle on CPUs that can't always deliver audio on time.           */
+/*                                                                    */
+/* Windrose deletes or rewrites the user Engine.ini when it exits, so */
+/* the keys are written again at every launch, before the engine      */
+/* reads its config. The first time, the original Engine.ini (if any) */
+/* is copied to Engine.ini.WindroseFXCore.bak and the original values */
+/* of the two keys are recorded in WindroseFXCore.state next to the   */
+/* DLL. Turning AudioBufferFix (or Enabled) off restores those values */
+/* on the next launch and removes the section/file if it becomes      */
+/* empty.                                                             */
+/* ------------------------------------------------------------------ */
+
+static const wchar_t kAudioSection[] = L"/Script/WindowsTargetPlatform.WindowsTargetSettings";
+static const wchar_t kKeyFrames[]    = L"AudioCallbackBufferFrameSize";
+static const wchar_t kKeyQueue[]     = L"AudioNumBuffersToEnqueue";
+
+/* %LOCALAPPDATA%\<Project>\Saved\Config\Windows\Engine.ini, where <Project> is
+   the folder two levels above the DLL (...\Windrose\R5\Binaries\Win64 -> R5). */
+static int EngineIniPath(wchar_t *out, size_t cap, wchar_t *dirOut, size_t dirCap)
+{
+    wchar_t tmp[MAX_PATH];
+    wcsncpy(tmp, g_dir, MAX_PATH - 1); tmp[MAX_PATH - 1] = 0;
+    for (int i = 0; i < 2; i++) { wchar_t *s = wcsrchr(tmp, L'\\'); if (!s) return 0; *s = 0; }
+    wchar_t *proj = wcsrchr(tmp, L'\\');
+    if (!proj || !proj[1]) return 0;
+    proj++;
+
+    wchar_t lad[MAX_PATH];
+    DWORD n = GetEnvironmentVariableW(L"LOCALAPPDATA", lad, MAX_PATH);
+    if (!n || n >= MAX_PATH) return 0;
+    swprintf(dirOut, dirCap, L"%ls\\%ls\\Saved\\Config\\Windows", lad, proj);
+    swprintf(out, cap, L"%ls\\Engine.ini", dirOut);
+    return 1;
+}
+
+static int FileExists(const wchar_t *p) { return GetFileAttributesW(p) != INVALID_FILE_ATTRIBUTES; }
+
+static void StatePath(wchar_t *out, size_t cap) { swprintf(out, cap, L"%ls\\WindroseFXCore.state", g_dir); }
+
+/* Create Saved\Config\Windows if the game hasn't yet (fresh install). */
+static int EnsureDir(const wchar_t *dir)
+{
+    if (FileExists(dir)) return 1;
+    wchar_t tmp[MAX_PATH];
+    wcsncpy(tmp, dir, MAX_PATH - 1); tmp[MAX_PATH - 1] = 0;
+    for (wchar_t *p = tmp + 3; *p; p++)
+        if (*p == L'\\') { *p = 0; CreateDirectoryW(tmp, NULL); *p = L'\\'; }
+    CreateDirectoryW(tmp, NULL);
+    return FileExists(dir);
+}
+
+/* True when the file has no sections and nothing but whitespace (BOMs included). */
+static int IniIsEmpty(const wchar_t *path)
+{
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return 0;
+    BYTE buf[512]; DWORD got = 0;
+    LARGE_INTEGER sz; GetFileSizeEx(h, &sz);
+    int empty = sz.QuadPart <= (LONGLONG)sizeof(buf) && ReadFile(h, buf, sizeof(buf), &got, NULL);
+    CloseHandle(h);
+    for (DWORD i = 0; empty && i < got; i++)
+        if (!(buf[i] == ' ' || buf[i] == '\t' || buf[i] == '\r' || buf[i] == '\n' || buf[i] == 0 ||
+              buf[i] == 0xEF || buf[i] == 0xBB || buf[i] == 0xBF || buf[i] == 0xFF || buf[i] == 0xFE))
+            empty = 0;
+    return empty;
+}
+
+static void ApplyAudioBuffer(void)
+{
+    wchar_t eng[MAX_PATH], dir[MAX_PATH], st[MAX_PATH], val[64];
+    if (!EngineIniPath(eng, MAX_PATH, dir, MAX_PATH)) { LogLine("Audio buffer: could not work out the Engine.ini path"); return; }
+    StatePath(st, MAX_PATH);
+
+    if (!FileExists(st)) {
+        /* First time: back up the player's Engine.ini and record the original values. */
+        int existed = FileExists(eng);
+        if (existed) {
+            wchar_t bak[MAX_PATH];
+            swprintf(bak, MAX_PATH, L"%ls.WindroseFXCore.bak", eng);
+            if (!CopyFileW(eng, bak, TRUE) && GetLastError() != ERROR_FILE_EXISTS) {
+                LogLine("Audio buffer: could not back up Engine.ini (error %lu); not changing it", GetLastError());
+                return;
+            }
+        }
+        const wchar_t *keys[2] = { kKeyFrames, kKeyQueue };
+        for (int i = 0; i < 2; i++) {
+            DWORD n = existed ? GetPrivateProfileStringW(kAudioSection, keys[i], L"\x01", val, 64, eng) : 0;
+            int had = existed && !(n == 1 && val[0] == 1);
+            wchar_t k[64];
+            swprintf(k, 64, L"Had%ls", keys[i]);  WritePrivateProfileStringW(L"AudioBuffer", k, had ? L"1" : L"0", st);
+            swprintf(k, 64, L"Orig%ls", keys[i]); WritePrivateProfileStringW(L"AudioBuffer", k, had ? val : L"", st);
+        }
+        WritePrivateProfileStringW(L"AudioBuffer", L"EngineIni", eng, st);
+        if (!FileExists(st)) { LogLine("Audio buffer: could not write WindroseFXCore.state; not changing Engine.ini"); return; }
+    }
+
+    if (!EnsureDir(dir)) { LogLine("Audio buffer: config folder missing and could not be created"); return; }
+    wchar_t f[16], q[16];
+    swprintf(f, 16, L"%d", g_cfg.audioBufferFrames);
+    swprintf(q, 16, L"%d", g_cfg.audioBuffersToEnqueue);
+    BOOL ok = WritePrivateProfileStringW(kAudioSection, kKeyFrames, f, eng) &&
+              WritePrivateProfileStringW(kAudioSection, kKeyQueue, q, eng);
+    LogLine("Audio buffer: %s %d frames x %d buffers in Engine.ini",
+            ok ? "set" : "FAILED to set", g_cfg.audioBufferFrames, g_cfg.audioBuffersToEnqueue);
+}
+
+static void RevertAudioBuffer(void)
+{
+    wchar_t st[MAX_PATH], eng[MAX_PATH], val[64], k[64];
+    StatePath(st, MAX_PATH);
+    if (!FileExists(st)) return;                       /* nothing of ours to undo */
+    GetPrivateProfileStringW(L"AudioBuffer", L"EngineIni", L"", eng, MAX_PATH, st);
+
+    if (eng[0] && FileExists(eng)) {
+        const wchar_t *keys[2] = { kKeyFrames, kKeyQueue };
+        for (int i = 0; i < 2; i++) {
+            swprintf(k, 64, L"Had%ls", keys[i]);
+            int had = (int)GetPrivateProfileIntW(L"AudioBuffer", k, 0, st);
+            swprintf(k, 64, L"Orig%ls", keys[i]);
+            GetPrivateProfileStringW(L"AudioBuffer", k, L"", val, 64, st);
+            WritePrivateProfileStringW(kAudioSection, keys[i], had ? val : NULL, eng);
+        }
+        wchar_t sec[8];
+        if (GetPrivateProfileSectionW(kAudioSection, sec, 8, eng) == 0)
+            WritePrivateProfileStringW(kAudioSection, NULL, NULL, eng);      /* drop the empty section */
+        if (IniIsEmpty(eng)) DeleteFileW(eng);
+    }
+    DeleteFileW(st);
+    LogLine("Audio buffer: reverted Engine.ini to its original audio settings");
+}
+
+/* ------------------------------------------------------------------ */
 /* Worker                                                             */
 /* ------------------------------------------------------------------ */
 
@@ -430,8 +578,9 @@ static DWORD WINAPI Worker(LPVOID unused)
     ApplyProcessSettings();
 
     KAFFINITY bg = BackgroundMask();
-    LogLine("Critical LPs: game %d, render %d, rhi %d, audio %d | background mask 0x%llx",
-            CriticalLP(T_GAME), CriticalLP(T_RENDER), CriticalLP(T_RHI), g_audioLP, (unsigned long long)bg);
+    LogLine("Critical LPs: game %d, render %d, rhi %d, audio %d | background mask 0x%llx%s",
+            CriticalLP(T_GAME), CriticalLP(T_RENDER), CriticalLP(T_RHI), g_audioLP, (unsigned long long)bg,
+            g_cfg.isolateBackgroundWorkers ? "" : " (not applied: IsolateBackgroundWorkers=0)");
 
     ULONGLONG start = GetTickCount64();
     for (;;) {
@@ -455,12 +604,21 @@ void FXCore_Start(HMODULE self)
     if (!wcsstr(exe, L"Shipping")) return;
 
     LoadConfig();
-    if (!g_cfg.enabled) return;
+
+    wchar_t st[MAX_PATH];
+    StatePath(st, MAX_PATH);
+    int wantBuffer = g_cfg.enabled && g_cfg.audioBufferFix;
+    if (!g_cfg.enabled && !FileExists(st)) return;     /* fully off, nothing to undo */
 
     wchar_t logPath[MAX_PATH];
     swprintf(logPath, MAX_PATH, L"%ls\\WindroseFXCore.log", g_dir);
     g_log = _wfopen(logPath, L"w");
     LogLine("WindroseFXCore " FXCORE_VERSION " loaded into %ls", exe);
+
+    /* Done here, synchronously, so Engine.ini is in place before the engine
+       reads its config. Only a few small kernel32 file calls. */
+    if (wantBuffer) ApplyAudioBuffer(); else RevertAudioBuffer();
+    if (!g_cfg.enabled) { LogLine("Enabled=0: everything else is off"); return; }
 
     HANDLE t = CreateThread(NULL, 0, Worker, NULL, 0, NULL);
     if (t) CloseHandle(t);
