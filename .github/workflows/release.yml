@@ -1,0 +1,45 @@
+name: release
+
+# Builds version.dll, packages it for the game folder, and publishes a GitHub release.
+# Run it from the Actions tab (Release -> Run workflow), or push a tag like v1.0.1.
+# Versions with a hyphen (e.g. 1.0.0-beta) are published as pre-releases.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to release (no leading v), e.g. 1.0.0-beta"
+        required: true
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ziglang
+      - name: Resolve version
+        run: |
+          if [ -n "${{ github.event.inputs.version }}" ]; then V="${{ github.event.inputs.version }}"; else V="${GITHUB_REF_NAME#v}"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+      - run: sh build.sh
+      - run: sh package.sh "$VERSION"
+      - name: Release notes from CHANGELOG
+        run: |
+          awk -v v="$VERSION" '$0 ~ "^## "v {f=1; next} /^## / && f {exit} f' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "WindroseFXCore $VERSION" > notes.md
+          printf '\n**Install:** extract the zip into the Windrose game folder (Steam → Manage → Browse local files). Files land in `R5\\Binaries\\Win64\\`. See the README for details.\n' >> notes.md
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PRE=""; case "$VERSION" in *-*) PRE="--prerelease";; esac
+          gh release create "v$VERSION" "WindroseFXCore-$VERSION.zip" \
+            --title "WindroseFXCore $VERSION" --notes-file notes.md --target "$GITHUB_SHA" $PRE

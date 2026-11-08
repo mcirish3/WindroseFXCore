@@ -126,6 +126,10 @@ python -m ziglang cc -target x86_64-windows-gnu -O2 -shared -o version.dll src/v
 ```
 Or run `build.bat` (Windows) or `build.sh` (Linux/macOS).
 
+**Making a release:** add a section to `CHANGELOG.md`, then run **Actions → release → Run workflow** with the
+version number (or push a tag like `v1.0.1`). The workflow builds the DLL, packages the zip and publishes the release.
+Versions containing a hyphen (`1.1.0-beta`) are marked as pre-releases.
+
 **How it loads:** Unreal Engine's Core module links `version.dll`, so the game loads it from its own folder first.
 `src/version_proxy.c` forwards all 17 real exports to `System32\version.dll`, and `src/fxcore.c` starts one
 background thread that does the work. It only activates inside an executable whose name contains `Shipping`,
