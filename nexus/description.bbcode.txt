@@ -23,7 +23,8 @@ Windrose is an Unreal Engine 5 game that's heavy on the CPU. If your graphics ca
 [list]
 [*][b]Topology-aware thread placement[/b]: GameThread, RenderThread and RHIThread each get their own CPU module or core.
 [*][b]Background worker isolation[/b]: asset streaming and decompression are kept off those cores, so loading bursts can't interrupt frame building.
-[*][b]Priority floors[/b]: critical threads at Above Normal, the audio mixer at Highest. This stops audio crackle when the CPU is maxed out.
+[*][b]Audio protection[/b]: the audio mixer runs at time-critical priority on its own core, clear of background workers, so it never misses an audio buffer when the CPU is maxed out.
+[*][b]Priority floors[/b]: critical threads run at Above Normal.
 [*][b]0.5 ms timer resolution[/b]: steadier frame pacing.
 [*][b]Power-throttling opt-out[/b]: Windows never parks the game on a slow clock.
 [/list]

@@ -33,7 +33,7 @@
 #include <stdarg.h>
 #include <wchar.h>
 
-#define FXCORE_VERSION "1.0.0-beta"
+#define FXCORE_VERSION "1.0.1-beta"
 
 /* ------------------------------------------------------------------ */
 /* Config & logging                                                   */
@@ -48,6 +48,8 @@ typedef struct {
     int isolateBackgroundWorkers;
     int boostCriticalPriority;
     int boostAudioPriority;
+    int audioMixerPriority;       /* Windows thread priority for the mixer */
+    int placeAudioThread;
     int scanFastSeconds;          /* rescan every 1 s for this long          */
     int scanSlowMs;               /* then rescan at this interval            */
     int verboseLog;
@@ -84,6 +86,8 @@ static void LoadConfig(void)
     g_cfg.isolateBackgroundWorkers = IniInt(ini, L"IsolateBackgroundWorkers", 1);
     g_cfg.boostCriticalPriority    = IniInt(ini, L"BoostCriticalPriority", 1);
     g_cfg.boostAudioPriority       = IniInt(ini, L"BoostAudioPriority", 1);
+    g_cfg.audioMixerPriority       = IniInt(ini, L"AudioMixerPriority", THREAD_PRIORITY_TIME_CRITICAL);
+    g_cfg.placeAudioThread         = IniInt(ini, L"PlaceAudioThread", 1);
     g_cfg.scanFastSeconds          = IniInt(ini, L"ScanFastSeconds", 180);
     g_cfg.scanSlowMs               = IniInt(ini, L"ScanSlowMs", 5000);
     g_cfg.verboseLog               = IniInt(ini, L"VerboseLog", 0);
@@ -111,6 +115,7 @@ static int       g_ngrp;
 static KAFFINITY g_allMask;
 static int       g_crit[3] = { -1, -1, -1 };   /* preferred LP for game/render/rhi */
 static KAFFINITY g_bgMask;
+static int       g_audioLP = -1;                /* preferred LP for the audio mixer */
 
 static int LowestBit(KAFFINITY m) { for (int i = 0; i < 64; i++) if (m & ((KAFFINITY)1 << i)) return i; return -1; }
 static int PopCount(KAFFINITY m)  { int n = 0; while (m) { n += (int)(m & 1); m >>= 1; } return n; }
@@ -219,13 +224,21 @@ static void DetectTopology(void)
        pinning would do more harm than good (dual cores, plain quad cores). */
     if (bestCount >= 3 && g_ngrp >= 4) {
         int n = 0;
-        for (int i = 0; i < g_ngrp && n < 3; i++)
-            if (g_grp[i].l3 == bestL3 && g_grp[i].eff == topEff) g_crit[n++] = LowestBit(g_grp[i].mask);
+        for (int i = 0; i < g_ngrp; i++) {
+            if (g_grp[i].l3 != bestL3 || g_grp[i].eff != topEff) continue;
+            if (n < 3) g_crit[n++] = LowestBit(g_grp[i].mask);
+            else if (g_audioLP < 0) g_audioLP = LowestBit(g_grp[i].mask);   /* 4th fast group: audio */
+        }
 
-        /* Background workers: everything except the three critical LPs,
-           but never shrink the pool below half the machine. */
+        /* Background workers: everything except the critical LPs and the audio
+           LP, but never shrink the pool below half the machine. If excluding
+           the audio LP would, give up the audio LP rather than the workers. */
         KAFFINITY m = g_allMask;
         for (int s = 0; s < 3; s++) m &= ~((KAFFINITY)1 << g_crit[s]);
+        if (g_audioLP >= 0) {
+            KAFFINITY ma = m & ~((KAFFINITY)1 << g_audioLP);
+            if (PopCount(ma) * 2 >= PopCount(g_allMask)) m = ma; else g_audioLP = -1;
+        }
         if (PopCount(m) * 2 >= PopCount(g_allMask)) g_bgMask = m;
     } else {
         LogLine("Topology: fewer than 3 separate fast core groups; thread placement disabled (priority and timer fixes still apply)");
@@ -304,7 +317,14 @@ static int ApplyToThread(DWORD tid, int kind)
         if (g_cfg.boostCriticalPriority) RaisePriorityTo(h, THREAD_PRIORITY_ABOVE_NORMAL);
         break;
     case T_AUDIO_MIX:
-        if (g_cfg.boostAudioPriority) RaisePriorityTo(h, THREAD_PRIORITY_HIGHEST);
+        /* The mixer does a tiny amount of work per audio buffer but must never
+           miss its deadline, or the output crackles. Pro audio software runs
+           this kind of thread at time-critical priority. */
+        if (g_cfg.placeAudioThread && g_audioLP >= 0) {
+            PROCESSOR_NUMBER pn = { 0, (BYTE)g_audioLP, 0 };
+            SetThreadIdealProcessorEx(h, &pn, NULL);
+        }
+        if (g_cfg.boostAudioPriority) RaisePriorityTo(h, g_cfg.audioMixerPriority);
         break;
     case T_AUDIO:
         if (g_cfg.boostAudioPriority) RaisePriorityTo(h, THREAD_PRIORITY_ABOVE_NORMAL);
@@ -371,10 +391,17 @@ static void ApplyProcessSettings(void)
     if (g_cfg.disablePowerThrottling) {
         PROCESS_POWER_THROTTLING_STATE s = { 0 };
         s.Version     = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
-        s.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | 0x4 /* IGNORE_TIMER_RESOLUTION */;
+        s.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED | 0x4 /* IGNORE_TIMER_RESOLUTION, Windows 11 */;
         s.StateMask   = 0;  /* 0 = never throttle */
         BOOL ok = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &s, sizeof(s));
-        LogLine("Power throttling opt-out: %s", ok ? "ok" : "failed");
+        if (!ok) {
+            /* Windows 10 rejects the Windows 11-only timer flag; retry without it. */
+            s.ControlMask = PROCESS_POWER_THROTTLING_EXECUTION_SPEED;
+            ok = SetProcessInformation(GetCurrentProcess(), ProcessPowerThrottling, &s, sizeof(s));
+            LogLine("Power throttling opt-out: %s (execution speed only)", ok ? "ok" : "failed");
+        } else {
+            LogLine("Power throttling opt-out: ok");
+        }
     }
 
     DWORD cls = NORMAL_PRIORITY_CLASS;
@@ -391,6 +418,8 @@ static void ApplyProcessSettings(void)
 static DWORD WINAPI Worker(LPVOID unused)
 {
     (void)unused;
+    /* This thread only scans and tunes; it must never compete with the game. */
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
     pGetThreadDescription = (PFN_GetThreadDescription)
         GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription");
     if (!pGetThreadDescription)
@@ -401,8 +430,8 @@ static DWORD WINAPI Worker(LPVOID unused)
     ApplyProcessSettings();
 
     KAFFINITY bg = BackgroundMask();
-    LogLine("Critical LPs: game %d, render %d, rhi %d | background mask 0x%llx",
-            CriticalLP(T_GAME), CriticalLP(T_RENDER), CriticalLP(T_RHI), (unsigned long long)bg);
+    LogLine("Critical LPs: game %d, render %d, rhi %d, audio %d | background mask 0x%llx",
+            CriticalLP(T_GAME), CriticalLP(T_RENDER), CriticalLP(T_RHI), g_audioLP, (unsigned long long)bg);
 
     ULONGLONG start = GetTickCount64();
     for (;;) {

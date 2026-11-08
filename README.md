@@ -8,7 +8,7 @@ in-game settings you choose and works alongside FSR, DLSS, XeSS and frame genera
 
 It was built for an AMD FX-8350 and is written to adapt to whatever CPU it finds.
 
-> **Status: 1.0.0-beta.** It builds and loads correctly, but has had limited real-world testing so far.
+> **Status: 1.0.1-beta.** It builds and loads correctly, but has had limited real-world testing so far.
 > Please report your results (good or bad) with your log file. See [Reporting results](#reporting-results).
 
 ---
@@ -33,7 +33,8 @@ and this mod targets exactly that.
 |---|---|
 | **Topology-aware thread placement** | UE5's GameThread, RenderThread and RHIThread decide your frame rate. When two of them land on the same FX module or the same hyperthreaded core, they slow each other down. The mod reads your CPU's real cache layout at launch and gives each one its own module or core. |
 | **Background worker isolation** | UE's background pool (asset streaming, decompression) is kept off the three critical cores, so a burst of loading can't preempt the threads that build each frame. Most of the pool's capacity stays available. |
-| **Priority floors** | Critical threads run at least at Above Normal priority, and the audio mixer at Highest, which prevents crackling when the CPU is maxed out. |
+| **Audio protection** | The audio mixer runs at time-critical priority on its own core, kept clear of background workers, so it never misses an audio buffer when the CPU is maxed out. That is the usual cause of crackle on older CPUs. |
+| **Priority floors** | Critical threads run at least at Above Normal priority. |
 | **0.5 ms timer resolution** | Windows' default timer can make UE's frame limiter and thread waits overshoot by up to ~15 ms. That shows up as uneven frame pacing. |
 | **Power-throttling opt-out** | Stops Windows from applying EcoQoS or timer coalescing to the game. |
 
@@ -57,17 +58,17 @@ and it can't help if your GPU is the bottleneck. Lowering resolution or using FS
 After launching, open `R5\Binaries\Win64\WindroseFXCore.log`. On an FX-8350 it looks like this:
 
 ```
-WindroseFXCore 1.0.0-beta loaded into ...\R5-Win64-Shipping.exe
+WindroseFXCore 1.0.1-beta loaded into ...\R5-Win64-Shipping.exe
 CPU: AMD FX(tm)-8350 Eight-Core Processor
 Topology: 8 logical processors, 4 execution groups, 1 L3 domain(s)
 Timer resolution: 0.500 ms
 Power throttling opt-out: ok
 Process priority: raised
-Critical LPs: game 0, render 2, rhi 4 | background mask 0xea
+Critical LPs: game 0, render 2, rhi 4, audio 6 | background mask 0xaa
   GameThread       tid  ...  prio 1
   RenderThread     tid  ...  prio 1
   RHIThread        tid  ...  prio 1
-  AudioMixer       tid  ...  prio 2
+  AudioMixer       tid  ...  prio 15
 ```
 
 If there's no log file at all, the DLL isn't loading. Please open an issue.
@@ -87,6 +88,8 @@ turn one off, play the same stretch, and compare.
 | `IsolateBackgroundWorkers` | 1 | |
 | `BoostCriticalPriority` | 1 | |
 | `BoostAudioPriority` | 1 | |
+| `AudioMixerPriority` | 15 | 15 = time-critical, 2 = highest |
+| `PlaceAudioThread` | 1 | Gives the audio mixer its own core, clear of background workers |
 | `VerboseLog` | 0 | Logs every worker thread too |
 
 ## Uninstall
