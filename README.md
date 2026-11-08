@@ -42,7 +42,7 @@ and it can't help if your GPU is the bottleneck. Lowering resolution or using FS
 
 ## Install
 
-1. Download the latest zip from [Releases](../../releases) (or from Nexus Mods).
+1. Download the latest zip from [Nexus Mods](https://www.nexusmods.com/windrose/mods/574) or [Releases](../../releases).
 2. In Steam, right-click **Windrose → Manage → Browse local files**.
 3. Extract the zip into that folder. The files land in `R5\Binaries\Win64\`, next to the game's
    `...-Win64-Shipping.exe`:
@@ -50,7 +50,7 @@ and it can't help if your GPU is the bottleneck. Lowering resolution or using FS
    - `WindroseFXCore.ini`
 4. Launch the game normally.
 
-**Vortex** users can install the Nexus download through Vortex as usual.
+**Vortex** users can install the [Nexus download](https://www.nexusmods.com/windrose/mods/574) through Vortex as usual.
 
 ## Check that it's working
 
