@@ -268,7 +268,7 @@ static void DetectTopology(void)
 typedef HRESULT (WINAPI *PFN_GetThreadDescription)(HANDLE, PWSTR *);
 static PFN_GetThreadDescription pGetThreadDescription;
 
-enum { T_OTHER, T_GAME, T_RENDER, T_RHI, T_AUDIO_MIX, T_AUDIO, T_BACKGROUND };
+enum { T_OTHER, T_GAME, T_RENDER, T_RHI, T_AUDIO_MIX, T_AUDIO, T_BACKGROUND, T_FOREGROUND };
 
 static int Classify(const wchar_t *n)
 {
@@ -280,6 +280,8 @@ static int Classify(const wchar_t *n)
     if (!wcsncmp(n, L"AudioThread", 11))              return T_AUDIO;
     if (!wcsncmp(n, L"Background Worker", 17))        return T_BACKGROUND;
     if (!wcsncmp(n, L"BackgroundThreadPool", 20))     return T_BACKGROUND;
+    /* UE5 task-graph workers: only measured (PerfLogSeconds), never moved. */
+    if (!wcsncmp(n, L"Foreground Worker", 17))        return T_FOREGROUND;
     return T_OTHER;
 }
 
@@ -289,6 +291,7 @@ static const char *KindName(int k)
         case T_GAME: return "GameThread"; case T_RENDER: return "RenderThread";
         case T_RHI: return "RHIThread";   case T_AUDIO_MIX: return "AudioMixer";
         case T_AUDIO: return "AudioThread"; case T_BACKGROUND: return "BackgroundWorker";
+        case T_FOREGROUND: return "ForegroundWorker";
     }
     return "other";
 }
@@ -331,6 +334,9 @@ static ULONGLONG g_perfLastProc, g_perfLastWall;
 static ULONGLONG g_perfLastWorkers;
 static DWORD     g_workerTid[256];
 static int       g_nworkers;
+static DWORD     g_fgTid[256];
+static int       g_nfg;
+static ULONGLONG g_perfLastFg;
 static double    g_perfPeak[P_COUNT + 1];
 static int       g_perfSamples;
 
@@ -343,15 +349,17 @@ static ULONGLONG ThreadCpu(HANDLE h)
     return FtToU64(k) + FtToU64(u);
 }
 
-static ULONGLONG WorkersCpu(void)
+static ULONGLONG SumCpu(const DWORD *tids, int n)
 {
     ULONGLONG sum = 0;
-    for (int i = 0; i < g_nworkers; i++) {
-        HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, g_workerTid[i]);
+    for (int i = 0; i < n; i++) {
+        HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tids[i]);
         if (h) { sum += ThreadCpu(h); CloseHandle(h); }
     }
     return sum;
 }
+
+static double Pct(ULONGLONG now, ULONGLONG last, double dt) { return now >= last ? 100.0 * (double)(now - last) / dt : 0; }
 
 static ULONGLONG WallNow(void) { FILETIME f; GetSystemTimeAsFileTime(&f); return FtToU64(f); }
 
@@ -360,10 +368,8 @@ static void PerfTrack(DWORD tid, int kind)
     if (!g_cfg.perfLogSeconds) return;
     int slot = (kind == T_GAME) ? P_GAME : (kind == T_RENDER) ? P_RENDER :
                (kind == T_RHI) ? P_RHI : (kind == T_AUDIO_MIX) ? P_AUDIO : -1;
-    if (kind == T_BACKGROUND) {
-        if (g_nworkers < 256) g_workerTid[g_nworkers++] = tid;
-        return;
-    }
+    if (kind == T_BACKGROUND) { if (g_nworkers < 256) g_workerTid[g_nworkers++] = tid; return; }
+    if (kind == T_FOREGROUND) { if (g_nfg < 256) g_fgTid[g_nfg++] = tid; return; }
     if (slot < 0) return;
     HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, tid);
     if (!h) return;
@@ -378,7 +384,8 @@ static void PerfSample(void)
     FILETIME c, e, k, u;
     GetProcessTimes(GetCurrentProcess(), &c, &e, &k, &u);
     ULONGLONG proc = FtToU64(k) + FtToU64(u);
-    ULONGLONG workers = WorkersCpu();
+    ULONGLONG workers = SumCpu(g_workerTid, g_nworkers);
+    ULONGLONG fg      = SumCpu(g_fgTid, g_nfg);
 
     if (g_perfLastWall) {
         double dt = (double)(wall - g_perfLastWall);
@@ -390,18 +397,22 @@ static void PerfSample(void)
             g_perfLast[i] = now;
             if (pct[i] > g_perfPeak[i]) g_perfPeak[i] = pct[i];
         }
-        double procPct = 100.0 * (double)(proc - g_perfLastProc) / dt;
-        double wrkPct  = workers >= g_perfLastWorkers ? 100.0 * (double)(workers - g_perfLastWorkers) / dt : 0;
+        double procPct = Pct(proc, g_perfLastProc, dt);
+        double wrkPct  = Pct(workers, g_perfLastWorkers, dt);
+        double fgPct   = Pct(fg, g_perfLastFg, dt);
+        double other   = procPct - pct[P_GAME] - pct[P_RENDER] - pct[P_RHI] - pct[P_AUDIO] - wrkPct - fgPct;
+        if (other < 0) other = 0;
         if (procPct > g_perfPeak[P_COUNT]) g_perfPeak[P_COUNT] = procPct;
-        LogLine("Perf: game %3.0f%%  render %3.0f%%  rhi %3.0f%%  audio %3.0f%%  workers(%d) %4.0f%%  process %4.0f%% of %d00%%",
-                pct[P_GAME], pct[P_RENDER], pct[P_RHI], pct[P_AUDIO], g_nworkers, wrkPct, procPct, PopCount(g_allMask));
+        LogLine("Perf: game %3.0f%%  render %3.0f%%  rhi %3.0f%%  audio %3.0f%%  bg(%d) %3.0f%%  fg(%d) %3.0f%%  other %3.0f%%  process %3.0f%% of %d00%%",
+                pct[P_GAME], pct[P_RENDER], pct[P_RHI], pct[P_AUDIO], g_nworkers, wrkPct, g_nfg, fgPct,
+                other, procPct, PopCount(g_allMask));
         if (++g_perfSamples % 60 == 0)
             LogLine("Perf peaks so far: game %.0f%%  render %.0f%%  rhi %.0f%%  audio %.0f%%  process %.0f%%",
                     g_perfPeak[P_GAME], g_perfPeak[P_RENDER], g_perfPeak[P_RHI], g_perfPeak[P_AUDIO], g_perfPeak[P_COUNT]);
     } else {
         for (int i = 0; i < P_COUNT; i++) g_perfLast[i] = ThreadCpu(g_perfThread[i]);
     }
-    g_perfLastWall = wall; g_perfLastProc = proc; g_perfLastWorkers = workers;
+    g_perfLastWall = wall; g_perfLastProc = proc; g_perfLastWorkers = workers; g_perfLastFg = fg;
 }
 
 static int ApplyToThread(DWORD tid, int kind)
@@ -441,7 +452,7 @@ static int ApplyToThread(DWORD tid, int kind)
         }
         break;
     }
-    if (g_cfg.verboseLog || kind != T_BACKGROUND)
+    if (g_cfg.verboseLog || (kind != T_BACKGROUND && kind != T_FOREGROUND))
         LogLine("  %-16s tid %5lu  prio %d", KindName(kind), tid, GetThreadPriority(h));
     CloseHandle(h);
     return 1;
