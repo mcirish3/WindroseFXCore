@@ -1,0 +1,27 @@
+name: build
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install ziglang
+      - run: sh build.sh
+      - name: Package
+        run: |
+          mkdir -p pkg/R5/Binaries/Win64
+          cp dist/version.dll config/WindroseFXCore.ini pkg/R5/Binaries/Win64/
+          cp README.md LICENSE pkg/
+          cd pkg && zip -r ../WindroseFXCore.zip .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WindroseFXCore
+          path: WindroseFXCore.zip

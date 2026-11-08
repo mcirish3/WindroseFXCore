@@ -1,0 +1,62 @@
+[size=5][b]WindroseFXCore — CPU Optimizer for Older PCs[/b][/size]
+
+[b]A runtime mod that helps Windrose run better on older CPUs, without touching your graphics settings.[/b]
+
+WindroseFXCore is a small native DLL that loads with the game and changes [i]how Windows schedules Windrose on your CPU[/i]. It doesn't edit any config files, game files or saves, and it works with whatever in-game settings you choose, including FSR, DLSS, XeSS and frame generation.
+
+It was built on an AMD FX-8350 and adapts itself to whatever CPU it finds.
+
+[color=#f0ad4e][b]Beta:[/b] limited real-world testing so far. Please post your results with your log file. It helps tune it for everyone.[/color]
+
+[size=4][b]Who it's for[/b][/size]
+Windrose is an Unreal Engine 5 game that's heavy on the CPU. If your graphics card is fine but the game stutters, hitches in busy areas or drops frames in naval combat, your CPU is likely the bottleneck. That's what this mod targets.
+
+[list]
+[*][b]AMD FX (FX-4xxx to FX-9xxx):[/b] full benefit. The frame-critical threads are separated onto different modules, so they stop fighting over each module's shared FPU, L2 cache and decoder.
+[*][b]Older Intel Core i5/i7 with Hyper-Threading (2nd–9th gen):[/b] keeps the critical threads off each other's hyperthreads.
+[*][b]Ryzen 1000/2000/3000:[/b] same as above, and keeps the critical threads inside one CCX.
+[*][b]Intel 12th gen and newer:[/b] puts the critical threads on P-cores.
+[*][b]Dual cores or 4-core CPUs without SMT:[/b] thread placement switches itself off. The timer, priority and power fixes still apply.
+[/list]
+
+[size=4][b]What it does[/b][/size]
+[list]
+[*][b]Topology-aware thread placement[/b]: GameThread, RenderThread and RHIThread each get their own CPU module or core.
+[*][b]Background worker isolation[/b]: asset streaming and decompression are kept off those cores, so loading bursts can't interrupt frame building.
+[*][b]Priority floors[/b]: critical threads at Above Normal, the audio mixer at Highest. This stops audio crackle when the CPU is maxed out.
+[*][b]0.5 ms timer resolution[/b]: steadier frame pacing.
+[*][b]Power-throttling opt-out[/b]: Windows never parks the game on a slow clock.
+[/list]
+
+[b]What to expect:[/b] steadier frame times and fewer CPU hitches. It won't make an old CPU new, and it can't help if your GPU is the bottleneck.
+
+[size=4][b]Installation[/b][/size]
+[b]Vortex:[/b] install as usual.
+[b]Manual:[/b]
+[list=1]
+[*]In Steam, right-click Windrose → Manage → Browse local files.
+[*]Extract the zip into that folder. The files go into [b]R5\Binaries\Win64\[/b], next to the game's Shipping exe.
+[*]Launch the game normally.
+[/list]
+
+[b]Check it's working:[/b] open [b]R5\Binaries\Win64\WindroseFXCore.log[/b] after launching. It lists your CPU layout and the threads it tuned. If there's no log, the DLL didn't load. Please let me know in the comments.
+
+[size=4][b]Uninstall[/b][/size]
+Delete [b]version.dll[/b], [b]WindroseFXCore.ini[/b] and [b]WindroseFXCore.log[/b] from R5\Binaries\Win64. Nothing else is changed.
+
+[size=4][b]Configuration[/b][/size]
+Every fix can be switched off individually in [b]WindroseFXCore.ini[/b], so you can A/B test each one.
+
+[size=4][b]FAQ[/b][/size]
+[b]Safe online?[/b] Windrose is PvE and had no anti-cheat when this was released. If anti-cheat is ever added, remove the DLL before playing online.
+[b]Compatible with other mods?[/b] Yes, unless another mod also uses version.dll as its loader.
+[b]Game won't start after an update?[/b] Delete version.dll to rule it out, then post in the comments with the game version.
+
+[size=4][b]Open source[/b][/size]
+Full source (C, MIT license) and build instructions:
+[url=https://github.com/mcirish3/WindroseFXCore]github.com/mcirish3/WindroseFXCore[/url]
+
+[size=4][b]Reporting results[/b][/size]
+Post your CPU, GPU and RAM, your WindroseFXCore.log, and what changed: average FPS, 1% lows, stutter, and where you tested.
+
+Created by Patrick McCoy, with Claude (Anthropic).

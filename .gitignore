@@ -1,0 +1,5 @@
+dist/
+pkg/
+*.zip
+*.lib
+*.pdb
